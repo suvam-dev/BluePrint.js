@@ -12,15 +12,37 @@ const SNAP_THRESHOLD = 20; // snap to existing node within this many px
 // but display in "grid units" (divide by GRID) in the sidebar/equations
 
 function snapToGrid(val) {
-  return Math.round(val / GRID) * GRID;
+  // 100 times more precise snapping (i.e., snap to 0.01 grid units)
+  const precision = GRID / 100;
+  return Math.round(val / precision) * precision;
 }
 
-function nearestNode(nodes, x, y) {
+function nearestNode(nodes, members, x, y) {
   let best = null, bestDist = Infinity;
+  // Check exact nodes
   for (const n of nodes) {
     const d = Math.hypot(n.x - x, n.y - y);
-    if (d < bestDist) { bestDist = d; best = n; }
+    if (d < bestDist) { bestDist = d; best = { isMidpoint: false, ...n }; }
   }
+  
+  // Check member midpoints
+  if (members) {
+    const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
+    for (const m of members) {
+      const n1 = nodeMap[m.startNodeId];
+      const n2 = nodeMap[m.endNodeId];
+      if (n1 && n2) {
+        const mx = (n1.x + n2.x) / 2;
+        const my = (n1.y + n2.y) / 2;
+        const d = Math.hypot(mx - x, my - y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { isMidpoint: true, memberId: m.id, x: mx, y: my, n1, n2 };
+        }
+      }
+    }
+  }
+
   return bestDist < SNAP_THRESHOLD ? best : null;
 }
 
@@ -202,7 +224,7 @@ function InputModal({ title, fields, onConfirm, onCancel }) {
 export default function CanvasBoard({ width, height }) {
   const {
     system, mode, pendingMemberStart, solution,
-    addNode, addMember, addSupport, addForce, addMoment,
+    addNode, updateNodeCoords, addMember, addMemberFixed, addSupport, addForce, addMoment,
     removeNode, removeMember, removeSupport, removeForce, removeMoment,
     setPendingMemberStart, setSelectedNodeId, selectedNodeId,
   } = useMechanicsStore();
@@ -237,47 +259,90 @@ export default function CanvasBoard({ width, height }) {
     const pos = stage.getPointerPosition();
     const sx = snapToGrid(pos.x);
     const sy = snapToGrid(pos.y);
-    const snapped = nearestNode(system.nodes, pos.x, pos.y);
+    const snapped = nearestNode(system.nodes, system.members, pos.x, pos.y);
+
+    // If snapped is a midpoint, we need to split the member and create a node first
+    const resolveSnapNodeId = () => {
+      if (!snapped) return null;
+      if (!snapped.isMidpoint) return snapped.id;
+      
+      // We snapped to a midpoint. We need to actually create a node here
+      // and break the existing member into two.
+      // Do NOT snap to integer grid here, or angled members will warp/bend
+      const newNodeX = snapped.x;
+      const newNodeY = snapped.y;
+      
+      const newNode = addNode(newNodeX, newNodeY);
+      
+      // Now we need to remove the old member and create two new ones.
+      removeMember(snapped.memberId);
+      addMember(snapped.n1.id, newNode.id);
+      addMember(snapped.n2.id, newNode.id);
+      
+      return newNode.id;
+    };
 
     if (mode === 'addNode') {
-      addNode(sx, sy);
+      if (snapped && snapped.isMidpoint) {
+        resolveSnapNodeId();
+      } else if (!snapped) {
+        addNode(sx, sy);
+      }
       return;
     }
 
     if (mode === 'addMember') {
       if (snapped) {
+        const targetNodeId = resolveSnapNodeId();
+        if (!targetNodeId) return;
+        
         if (!pendingMemberStart) {
-          setPendingMemberStart(snapped.id);
+          setPendingMemberStart(targetNodeId);
         } else {
-          addMember(pendingMemberStart, snapped.id);
+          addMember(pendingMemberStart, targetNodeId);
           setPendingMemberStart(null);
         }
       }
       return;
     }
 
+    if (mode === 'addMemberFixed') {
+      if (snapped) {
+        const targetNodeId = resolveSnapNodeId();
+        if (!targetNodeId) return;
+        setModal({ type: 'memberFixed', nodeId: targetNodeId });
+      }
+      return;
+    }
+
     if (['addPin', 'addRoller', 'addFixed'].includes(mode)) {
       if (snapped) {
+        const targetNodeId = resolveSnapNodeId();
+        if (!targetNodeId) return;
         const typeMap = { addPin: 'pin', addRoller: 'roller', addFixed: 'fixed' };
-        addSupport(snapped.id, typeMap[mode]);
+        addSupport(targetNodeId, typeMap[mode]);
       }
       return;
     }
 
     if (mode === 'addForce') {
       if (snapped) {
-        setModal({ type: 'force', nodeId: snapped.id });
+        const targetNodeId = resolveSnapNodeId();
+        if (!targetNodeId) return;
+        setModal({ type: 'force', nodeId: targetNodeId });
       }
       return;
     }
 
     if (mode === 'addMoment') {
       if (snapped) {
-        setModal({ type: 'moment', nodeId: snapped.id });
+        const targetNodeId = resolveSnapNodeId();
+        if (!targetNodeId) return;
+        setModal({ type: 'moment', nodeId: targetNodeId });
       }
       return;
     }
-  }, [mode, pendingMemberStart, system.nodes, addNode, addMember, addSupport, setPendingMemberStart]);
+  }, [mode, pendingMemberStart, system.nodes, system.members, addNode, addMember, removeMember, addSupport, setPendingMemberStart]);
 
   const handleMouseMove = useCallback((e) => {
     const pos = e.target.getStage().getPointerPosition();
@@ -320,6 +385,11 @@ export default function CanvasBoard({ width, height }) {
             const lenUnits = (lenPx / GRID).toFixed(2);
             // Angle for rotating label along member direction
             const angle = Math.atan2(e.y - s.y, e.x - s.x) * 180 / Math.PI;
+            
+            const force = solution?.memberForces?.[m.id];
+            const forceText = force ? `${Math.abs(force.value).toFixed(2)}kN (${force.type})` : `L=${lenUnits}u`;
+            const forceColor = force ? (force.type === 'T' ? '#34d399' : '#f87171') : '#3c6080';
+
             return (
               <Group 
                 key={m.id} 
@@ -341,21 +411,21 @@ export default function CanvasBoard({ width, height }) {
                 />
                 <Line
                   points={[s.x, s.y, e.x, e.y]}
-                  stroke={mode === 'delete' ? '#f87171' : '#60a5fa'}
+                  stroke={mode === 'delete' ? '#f87171' : (force ? forceColor : '#60a5fa')}
                   strokeWidth={3}
                   lineCap="round"
                 />
                 {/* Midpoint dot */}
                 <Circle x={midX} y={midY} radius={3} fill="#1d4ed8" stroke="#60a5fa" strokeWidth={1.5} />
-                {/* Length label */}
+                {/* Length/Force label */}
                 <Group x={midX} y={midY} rotation={angle > 90 || angle < -90 ? angle + 180 : angle}>
                   <Text
-                    x={-20} y={-18}
-                    text={`L=${lenUnits}u`}
+                    x={-40} y={-18}
+                    text={forceText}
                     fontSize={10}
-                    fill="#3c6080"
+                    fill={forceColor}
                     fontFamily="IBM Plex Mono, monospace"
-                    width={40}
+                    width={80}
                     align="center"
                   />
                 </Group>
@@ -443,6 +513,10 @@ export default function CanvasBoard({ width, height }) {
             return (
               <Group
                 key={n.id}
+                onDblClick={(e) => {
+                  e.cancelBubble = true;
+                  setModal({ type: 'editNode', nodeId: n.id, n });
+                }}
                 onClick={(e) => {
                   e.cancelBubble = true;
                   // Dispatch action based on current toolbar mode
@@ -456,6 +530,8 @@ export default function CanvasBoard({ width, height }) {
                     setModal({ type: 'force', nodeId: n.id });
                   } else if (mode === 'addMoment') {
                     setModal({ type: 'moment', nodeId: n.id });
+                  } else if (mode === 'addMemberFixed') {
+                    setModal({ type: 'memberFixed', nodeId: n.id });
                   } else if (mode === 'addMember') {
                     if (!pendingMemberStart) {
                       setPendingMemberStart(n.id);
@@ -490,7 +566,7 @@ export default function CanvasBoard({ width, height }) {
                 />
                 {/* Grid coordinate label */}
                 <Text x={n.x + 12} y={n.y + 2}
-                  text={`(${n.x / GRID}, ${-(n.y / GRID - Math.round(height / GRID / 2))})`}
+                  text={`(${(n.x / GRID).toFixed(2)}, ${-(n.y / GRID).toFixed(2)})`}
                   fill="#3c6080"
                   fontSize={9}
                   fontFamily="IBM Plex Mono, monospace"
@@ -532,6 +608,38 @@ export default function CanvasBoard({ width, height }) {
           ]}
           onConfirm={(v) => {
             addMoment(modal.nodeId, parseFloat(v.magnitude));
+            setModal(null);
+          }}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal?.type === 'memberFixed' && (
+        <InputModal
+          title="📏 Add Fixed Rod"
+          fields={[
+            { key: 'length', label: 'Length (grid units)', placeholder: '3', default: '3' },
+            { key: 'angle', label: 'Angle (° from +X, CCW)', placeholder: '0', default: '0' },
+          ]}
+          onConfirm={(v) => {
+            addMemberFixed(modal.nodeId, parseFloat(v.length), parseFloat(v.angle));
+            setModal(null);
+          }}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal?.type === 'editNode' && (
+        <InputModal
+          title={`✏️ Edit Node ${modal.n.label}`}
+          fields={[
+            { key: 'x', label: 'X Coordinate (grid units)', placeholder: '0.00', default: (modal.n.x / GRID).toFixed(2) },
+            { key: 'y', label: 'Y Coordinate (grid units)', placeholder: '0.00', default: (-(modal.n.y / GRID)).toFixed(2) },
+          ]}
+          onConfirm={(v) => {
+            const userX = parseFloat(v.x);
+            const userY = parseFloat(v.y);
+            const pxX = userX * GRID;
+            const pxY = -userY * GRID;
+            updateNodeCoords(modal.nodeId, pxX, pxY);
             setModal(null);
           }}
           onCancel={() => setModal(null)}

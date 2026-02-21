@@ -23,14 +23,72 @@ const useMechanicsStore = create((set, get) => ({
 
   addNode: (x, y) => {
     const node = createNode(uid(), x, y);
-    set((s) => ({ system: { ...s.system, nodes: [...s.system.nodes, node] } }));
+    set((s) => ({ system: { ...s.system, nodes: [...s.system.nodes, node] }, solution: null }));
     return node;
+  },
+
+  updateNodeCoords: (id, newX, newY) => {
+    set((s) => ({
+      system: {
+        ...s.system,
+        nodes: s.system.nodes.map(n => n.id === id ? { ...n, x: newX, y: newY } : n)
+      },
+      solution: null
+    }));
   },
 
   addMember: (startNodeId, endNodeId) => {
     if (startNodeId === endNodeId) return;
     const member = createMember(uid(), startNodeId, endNodeId);
     set((s) => ({ system: { ...s.system, members: [...s.system.members, member] } }));
+  },
+
+  addMemberFixed: (startNodeId, lengthGrid, angleDeg) => {
+    const GRID = 40;
+    set((s) => {
+      const startNode = s.system.nodes.find(n => n.id === startNodeId);
+      if (!startNode) return s;
+      
+      const rad = (angleDeg * Math.PI) / 180;
+      const lengthPx = lengthGrid * GRID;
+      
+      const newX = Math.round(startNode.x + Math.cos(rad) * lengthPx);
+      // y points down in canvas, angles are measured CCW from +X
+      const newY = Math.round(startNode.y - Math.sin(rad) * lengthPx);
+
+      // Snap to existing node
+      let endNode = s.system.nodes.find(n => Math.hypot(n.x - newX, n.y - newY) < 20);
+      let newNodes = s.system.nodes;
+      
+      if (!endNode) {
+        endNode = createNode(uid(), Math.round(newX/GRID)*GRID, Math.round(newY/GRID)*GRID); // snap to grid logic if needed, or just newX, newY. Let's use newX, newY but snapToGrid if we want it pixel perfect on grid.
+        // Wait, start node is already snapped to grid. lengthGrid * GRID is integer multiple of GRID.
+        // cos/sin could have float inaccuracies
+        newX = Math.round(newX / GRID) * GRID;
+        newY = Math.round(newY / GRID) * GRID;
+        
+        endNode = createNode(uid(), newX, newY);
+        newNodes = [...newNodes, endNode];
+      }
+      
+      if (startNodeId === endNode.id) return { system: { ...s.system, nodes: newNodes } };
+      
+      // Prevent duplicate members
+      const exists = s.system.members.find(m => 
+        (m.startNodeId === startNodeId && m.endNodeId === endNode.id) ||
+        (m.startNodeId === endNode.id && m.endNodeId === startNodeId)
+      );
+      if (exists) return { system: { ...s.system, nodes: newNodes } };
+
+      const member = createMember(uid(), startNodeId, endNode.id);
+      return { 
+        system: { 
+          ...s.system, 
+          nodes: newNodes,
+          members: [...s.system.members, member] 
+        }
+      };
+    });
   },
 
   addSupport: (nodeId, type) => {

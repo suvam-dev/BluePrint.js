@@ -194,7 +194,7 @@ export default function Sidebar() {
             {nodes.map((n) => (
               <ItemRow key={n.id}
                 label={n.label}
-                value={`(${(n.x/GRID).toFixed(0)}, ${(n.y/GRID).toFixed(0)})`}
+                value={`(${(n.x/GRID).toFixed(2)}, ${-(n.y/GRID).toFixed(2)})`}
                 color="#7fa8d4"
                 onDelete={() => { clearSolution(); removeNode(n.id); }}
               />
@@ -206,6 +206,25 @@ export default function Sidebar() {
 
           {/* EQUATIONS */}
           {unknowns.length > 0 && <EquationPanel />}
+
+          {/* MEMBER FORCES */}
+          {solution?.memberForces && (
+            <Section title="MEMBER FORCES" count={Object.keys(solution.memberForces).length} color="#c084fc">
+              {Object.entries(solution.memberForces).map(([mId, force]) => {
+                const m = members.find(m => m.id === mId);
+                const nA = nodeMap[m?.startNodeId];
+                const nB = nodeMap[m?.endNodeId];
+                const label = nA && nB ? `${nA.label}—${nB.label}` : mId;
+                return (
+                  <ItemRow key={mId}
+                    label={label}
+                    value={`${Math.abs(force.value).toFixed(2)}kN (${force.type})`}
+                    color={force.type === 'T' ? '#34d399' : force.type === 'C' ? '#f87171' : '#3c6080'}
+                  />
+                );
+              })}
+            </Section>
+          )}
 
           {/* REACTIONS */}
           {(solution || solveError) && (

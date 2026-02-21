@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   MousePointer2, Plus, Minus, Triangle, Circle, Square,
-  ArrowDown, RotateCcw, Trash2, Zap, ChevronRight
+  ArrowDown, RotateCcw, Trash2, Zap, ChevronRight, Ruler
 } from 'lucide-react';
 import useMechanicsStore from '../store/mechanicsStore';
 
@@ -18,6 +18,7 @@ const TOOLS = [
     group: 'Members',
     items: [
       { id: 'addMember', label: 'Draw Member', icon: Minus, color: '#60a5fa' },
+      { id: 'addMemberFixed', label: 'Fixed Rod', icon: Ruler, color: '#60a5fa' },
     ],
   },
   {

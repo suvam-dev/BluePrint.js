@@ -53,6 +53,145 @@ export function solve(system) {
   const nUnknowns = unknowns.length;
 
   if (nUnknowns === 0) return { determinacy: 'No supports — free body', reactions: {} };
+
+  // ── Try Truss Solver (Direct Stiffness Method) ───────────────────────────
+  if (system.members.length > 0) {
+    const N = system.nodes.length;
+    const K = Array.from({ length: 2 * N }, () => Array(2 * N).fill(0));
+    const nodeIdx = {};
+    system.nodes.forEach((n, i) => nodeIdx[n.id] = i);
+
+    system.members.forEach((m) => {
+      const i = nodeIdx[m.startNodeId];
+      const j = nodeIdx[m.endNodeId];
+      const nA = nodeMap[m.startNodeId];
+      const nB = nodeMap[m.endNodeId];
+      if (nA && nB && i !== undefined && j !== undefined) {
+        const dx = px(nB) - px(nA);
+        const dy = py(nB) - py(nA);
+        const L = Math.hypot(dx, dy);
+        if (L > 0) {
+          const c = dx / L, s = dy / L;
+          const k1 = c * c / L, k2 = c * s / L, k3 = s * s / L;
+          
+          K[2*i][2*i]   += k1; K[2*i][2*i+1] += k2; K[2*i][2*j]   -= k1; K[2*i][2*j+1] -= k2;
+          K[2*i+1][2*i] += k2; K[2*i+1][2*i+1]+= k3;K[2*i+1][2*j] -= k2; K[2*i+1][2*j+1]-= k3;
+          
+          K[2*j][2*i]   -= k1; K[2*j][2*i+1] -= k2; K[2*j][2*j]   += k1; K[2*j][2*j+1] += k2;
+          K[2*j+1][2*i] -= k2; K[2*j+1][2*i+1]-= k3;K[2*j+1][2*j] += k2; K[2*j+1][2*j+1]+= k3;
+        }
+      }
+    });
+
+    const K_orig = K.map(row => [...row]);
+    const F_app = Array(2 * N).fill(0);
+    
+    // Add artificial soft springs to ground to prevent singular matrix for unsupported trusses
+    for (let c = 0; c < 2 * N; c++) {
+      K[c][c] += 1e-6;
+    }
+
+    forces.forEach(f => {
+      const idx = nodeIdx[f.nodeId];
+      if (idx !== undefined) {
+        const rad = (f.angle * Math.PI) / 180;
+        F_app[2*idx]   += f.magnitude * Math.cos(rad);
+        F_app[2*idx+1] += f.magnitude * Math.sin(rad);
+      }
+    });
+
+    const fixedDOFs = new Set();
+    supports.forEach(sp => {
+      const idx = nodeIdx[sp.nodeId];
+      if (idx !== undefined) {
+        if (sp.type === 'pin' || sp.type === 'fixed') {
+          fixedDOFs.add(2*idx);
+          fixedDOFs.add(2*idx+1);
+        } else if (sp.type === 'roller') {
+          fixedDOFs.add(2*idx+1);
+        }
+      }
+    });
+
+    const F = [...F_app];
+    fixedDOFs.forEach(dof => {
+      for (let c = 0; c < 2 * N; c++) K[dof][c] = 0;
+      for (let r = 0; r < 2 * N; r++) {
+        if (!fixedDOFs.has(r)) F[r] -= K[r][dof] * 0;
+        K[r][dof] = 0;
+      }
+      K[dof][dof] = 1;
+      F[dof] = 0;
+    });
+
+    try {
+      const xVec = lusolve(K, F);
+      const U = xVec.map(v => v[0]);
+
+      const nodalForces = Array(2 * N).fill(0);
+      for (let r = 0; r < 2 * N; r++) {
+        for (let c = 0; c < 2 * N; c++) {
+          nodalForces[r] += K_orig[r][c] * U[c];
+        }
+      }
+
+      const reactions = {};
+      supports.forEach(sp => {
+        const idx = nodeIdx[sp.nodeId];
+        if (idx !== undefined) {
+          if (!reactions[sp.nodeId]) reactions[sp.nodeId] = {};
+          const rx = nodalForces[2*idx] - F_app[2*idx];
+          const ry = nodalForces[2*idx+1] - F_app[2*idx+1];
+          if (sp.type === 'pin') {
+            reactions[sp.nodeId]['Rx'] = parseFloat(rx.toFixed(3));
+            reactions[sp.nodeId]['Ry'] = parseFloat(ry.toFixed(3));
+          } else if (sp.type === 'roller') {
+            reactions[sp.nodeId]['Ry'] = parseFloat(ry.toFixed(3));
+          } else if (sp.type === 'fixed') {
+            reactions[sp.nodeId]['Rx'] = parseFloat(rx.toFixed(3));
+            reactions[sp.nodeId]['Ry'] = parseFloat(ry.toFixed(3));
+          }
+        }
+      });
+
+      const memberForces = {};
+      system.members.forEach(m => {
+        const i = nodeIdx[m.startNodeId];
+        const j = nodeIdx[m.endNodeId];
+        const nA = nodeMap[m.startNodeId];
+        const nB = nodeMap[m.endNodeId];
+        if (nA && nB) {
+          const dx = px(nB) - px(nA);
+          const dy = py(nB) - py(nA);
+          const L = Math.hypot(dx, dy);
+          if (L > 0) {
+            const c = dx / L, s = dy / L;
+            const force = (1 / L) * ((U[2*j] - U[2*i]) * c + (U[2*j+1] - U[2*i+1]) * s);
+            memberForces[m.id] = {
+              value: parseFloat(force.toFixed(3)),
+              type: Math.abs(force) < 0.001 ? '0' : (force > 0 ? 'T' : 'C')
+            };
+          }
+        }
+      });
+
+      let maxDisplacement = 0;
+      U.forEach(u => maxDisplacement = Math.max(maxDisplacement, Math.abs(u)));
+      const isUnstable = fixedDOFs.size < 3 || maxDisplacement > 1e3;
+      
+      const detStr = isUnstable ? 'Unstable Truss (Mechanisms / Free Body)' 
+        : (fixedDOFs.size + system.members.length > 2 * N 
+        ? 'Statically indeterminate truss (DSM) ✓' 
+        : 'Statically determinate truss ✓');
+
+      // We still return reactions and memberForces even if unstable!
+      return { determinacy: detStr, reactions, memberForces };
+    } catch (e) {
+      // Singular matrix
+    }
+  }
+
+  // ── Fallback to 3x3 global body eq ──────────────────────────────────────
   if (nUnknowns < 3)   return { determinacy: `Mechanism (only ${nUnknowns} reaction${nUnknowns > 1 ? 's' : ''})`, reactions: {} };
   if (nUnknowns > 3)   return { determinacy: `Statically indeterminate (${nUnknowns} unknowns > 3 equations)`, reactions: {} };
 

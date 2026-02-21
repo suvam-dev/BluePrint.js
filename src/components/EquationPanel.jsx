@@ -100,6 +100,90 @@ function buildEquations(system) {
   };
 }
 
+function buildMojEquations(system) {
+  const { nodes, members, supports, forces } = system;
+  const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const px = (node) => node.x / GRID;
+  const py = (node) => -(node.y / GRID);
+
+  const nodeEqs = [];
+  
+  for (const n of nodes) {
+    const fxLhs = [];
+    const fyLhs = [];
+    let sumKnownFx = 0;
+    let sumKnownFy = 0;
+
+    // Supports at this node
+    const sp = supports.find(s => s.nodeId === n.id);
+    if (sp) {
+      if (sp.type === 'pin' || sp.type === 'fixed') {
+        fxLhs.push(`R_${n.label}x`);
+        fyLhs.push(`R_${n.label}y`);
+      }
+      if (sp.type === 'roller') {
+        fyLhs.push(`R_${n.label}y`);
+      }
+    }
+
+    // Members connected to this node
+    for (const m of members) {
+      if (m.startNodeId === n.id || m.endNodeId === n.id) {
+        const otherId = m.startNodeId === n.id ? m.endNodeId : m.startNodeId;
+        const other = nodeMap[otherId];
+        if (other) {
+          const dx = px(other) - px(n);
+          const dy = py(other) - py(n);
+          const len = Math.hypot(dx, dy);
+          if (len > 0) {
+            const cosT = dx / len;
+            const sinT = dy / len;
+            const labelN1 = nodeMap[m.startNodeId].label;
+            const labelN2 = nodeMap[m.endNodeId].label;
+            const FLab = `F_{${labelN1}${labelN2}}`;
+
+            if (Math.abs(cosT) > 0.001) {
+              const sign = cosT > 0 ? '+' : '-';
+              const val = Math.abs(cosT) > 0.99 ? FLab : `${Math.abs(cosT).toFixed(2)}${FLab}`;
+              fxLhs.push(`${sign} ${val}`);
+            }
+            if (Math.abs(sinT) > 0.001) {
+              const sign = sinT > 0 ? '+' : '-';
+              const val = Math.abs(sinT) > 0.99 ? FLab : `${Math.abs(sinT).toFixed(2)}${FLab}`;
+              fyLhs.push(`${sign} ${val}`);
+            }
+          }
+        }
+      }
+    }
+
+    // Forces at this node
+    for (const f of forces) {
+      if (f.nodeId === n.id) {
+        const rad = (f.angle * Math.PI) / 180;
+        sumKnownFx += f.magnitude * Math.cos(rad);
+        sumKnownFy += f.magnitude * Math.sin(rad);
+      }
+    }
+
+    // Format right-hand side
+    const formatTerms = (terms) => {
+      let str = terms.join(' ');
+      if (str.startsWith('+ ')) str = str.substring(2); // remove leading +
+      return str || '0';
+    };
+
+    nodeEqs.push({
+      label: n.label,
+      fxLhs: formatTerms(fxLhs),
+      fxRhs: `-(${fmt(sumKnownFx)})`,
+      fyLhs: formatTerms(fyLhs),
+      fyRhs: `-(${fmt(sumKnownFy)})`
+    });
+  }
+  return nodeEqs;
+}
+
 function EqRow({ label, eq, color }) {
   if (!eq) return null;
   return (
@@ -140,6 +224,27 @@ export default function EquationPanel() {
       <EqRow label="ΣFx = 0" eq={eqs.eqFx} color="#60a5fa" />
       <EqRow label="ΣFy = 0" eq={eqs.eqFy} color="#60a5fa" />
       <EqRow label="ΣMz = 0 (about origin)" eq={eqs.eqMz} color="#a78bfa" />
+
+      {/* METHOD OF JOINTS */}
+      {system.members.length > 0 && (
+        <div className="mt-2 mb-2">
+          <div className="text-[9px] mono px-2 py-1 mb-2 rounded border-l-2"
+            style={{ color: '#fb923c', background: 'rgba(251,146,60,0.06)', borderColor: 'rgba(251,146,60,0.4)', letterSpacing: '0.08em' }}>
+            METHOD OF JOINTS (NODE EQ)
+          </div>
+          {buildMojEquations(system).map((nodeData, idx) => (
+            <div key={idx} className="mb-2 p-2 rounded-lg" style={{ background: 'rgba(13,27,46,0.5)', border: '1px solid rgba(251,146,60,0.15)' }}>
+              <div className="text-[10px] mono mb-1 font-semibold" style={{ color: '#fb923c' }}>NODE {nodeData.label}</div>
+              <div className="text-[9px] mono" style={{ color: '#e2eeff' }}>
+                <span style={{ color: '#fb923c' }}>ΣFx: </span>{nodeData.fxLhs} = <span style={{ color: '#facc15' }}>{nodeData.fxRhs}</span>
+              </div>
+              <div className="text-[9px] mono mt-1" style={{ color: '#e2eeff' }}>
+                <span style={{ color: '#fb923c' }}>ΣFy: </span>{nodeData.fyLhs} = <span style={{ color: '#facc15' }}>{nodeData.fyRhs}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {solution?.reactions && (
         <div className="mt-1 rounded-lg p-2"
