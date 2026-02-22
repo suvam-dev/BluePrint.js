@@ -4,10 +4,44 @@ import useMechanicsStore from '../store/mechanicsStore';
 import EquationPanel from './EquationPanel';
 import {
   Cpu, ChevronDown, ChevronRight,
-  AlertTriangle, CheckCircle2, Code2, Trash2
+  AlertTriangle, CheckCircle2, Code2, Trash2, Plus
 } from 'lucide-react';
 
 const GRID = 40;
+
+function AddRodForm() {
+  const addRodDirectly = useMechanicsStore(s => s.addRodDirectly);
+  const [vals, setVals] = useState({ x: '0', y: '0', len: '5', ang: '0' });
+  
+  const handleAdd = () => {
+    addRodDirectly(parseFloat(vals.x||0), parseFloat(vals.y||0), parseFloat(vals.len||0), parseFloat(vals.ang||0));
+  };
+  
+  return (
+    <div className="mb-2" style={{ background: 'rgba(52,211,153,0.03)', border: '1px solid rgba(52,211,153,0.1)', borderRadius: '0.5rem' }}>
+      <div className="px-3 py-2 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#34d399' }} />
+          <span className="text-xs font-bold mono text-emerald-400">ADD DIRECT ROD</span>
+        </div>
+      </div>
+      <div className="px-2 pb-2 flex flex-col gap-2">
+        <div className="flex gap-2">
+          <input className="w-1/2 bg-[#070d1a] border border-blue-900 rounded p-1.5 text-xs text-blue-100 mono text-center focus:outline-none focus:border-emerald-500 transition-colors" value={vals.x} onChange={e => setVals({...vals, x: e.target.value})} placeholder="Start X" />
+          <input className="w-1/2 bg-[#070d1a] border border-blue-900 rounded p-1.5 text-xs text-blue-100 mono text-center focus:outline-none focus:border-emerald-500 transition-colors" value={vals.y} onChange={e => setVals({...vals, y: e.target.value})} placeholder="Start Y" />
+        </div>
+        <div className="flex gap-2">
+          <input className="w-1/2 bg-[#070d1a] border border-blue-900 rounded p-1.5 text-xs text-blue-100 mono text-center focus:outline-none focus:border-emerald-500 transition-colors" value={vals.len} onChange={e => setVals({...vals, len: e.target.value})} placeholder="Length" />
+          <input className="w-1/2 bg-[#070d1a] border border-blue-900 rounded p-1.5 text-xs text-blue-100 mono text-center focus:outline-none focus:border-emerald-500 transition-colors" value={vals.ang} onChange={e => setVals({...vals, ang: e.target.value})} placeholder="Angle (°)" />
+        </div>
+        <button onClick={handleAdd} 
+          className="w-full bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-600/50 text-[10px] uppercase font-bold tracking-wider py-1.5 rounded flex items-center justify-center gap-1 transition-colors">
+          <Plus size={12} strokeWidth={3} /> ADD ROD
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function Section({ title, count, color, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -134,6 +168,8 @@ export default function Sidebar() {
         )}
 
         <div className="px-2 py-3">
+
+          <AddRodForm />
 
           {/* KNOWNS */}
           <Section title="KNOWNS" count={forces.length + moments.length} color="#facc15">

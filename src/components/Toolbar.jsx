@@ -60,7 +60,7 @@ export default function Toolbar() {
       </div>
 
       {TOOLS.map((group) => (
-        <div key={group.group} className="flex flex-col gap-1 mb-2">
+        <div key={group.group} className="flex flex-col gap-1 mb-4 pd-2">
           <span className="text-[8px] mono text-center mb-1"
             style={{ color: 'rgba(96,165,250,0.4)', letterSpacing: '0.08em' }}>
             {group.group.toUpperCase()}

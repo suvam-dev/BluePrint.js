@@ -71,22 +71,98 @@ const useMechanicsStore = create((set, get) => ({
         newNodes = [...newNodes, endNode];
       }
       
-      if (startNodeId === endNode.id) return { system: { ...s.system, nodes: newNodes } };
+      if (startNodeId === endNode.id) return { system: { ...s.system, nodes: newNodes }, solution: null };
       
-      // Prevent duplicate members
-      const exists = s.system.members.find(m => 
-        (m.startNodeId === startNodeId && m.endNodeId === endNode.id) ||
-        (m.startNodeId === endNode.id && m.endNodeId === startNodeId)
+      const exists = s.system.members.some(
+        m => (m.startNodeId === startNode.id && m.endNodeId === endNode.id) || 
+             (m.startNodeId === endNode.id && m.endNodeId === startNode.id)
       );
-      if (exists) return { system: { ...s.system, nodes: newNodes } };
+      
+      if (exists) return { system: { ...s.system, nodes: newNodes }, solution: null };
 
-      const member = createMember(uid(), startNodeId, endNode.id);
+      const newMember = createMember(uid(), startNode.id, endNode.id);
       return { 
         system: { 
           ...s.system, 
           nodes: newNodes,
-          members: [...s.system.members, member] 
-        }
+          members: [...s.system.members, newMember] 
+        },
+        solution: null
+      };
+    });
+  },
+
+  addRodDirectly: (startXGrid, startYGrid, lengthGrid, angleDeg) => {
+    const GRID = 40;
+    console.log("addRodDirectly called with:", {startXGrid, startYGrid, lengthGrid, angleDeg});
+    set((s) => {
+      const startNodeX = startXGrid * GRID;
+      const startNodeY = -startYGrid * GRID;
+      
+      const rad = (angleDeg * Math.PI) / 180;
+      const lengthPx = lengthGrid * GRID;
+      
+      const endNodeX = startNodeX + Math.cos(rad) * lengthPx;
+      const endNodeY = startNodeY - Math.sin(rad) * lengthPx;
+
+      console.log("Calculated internal coords:", {startNodeX, startNodeY, endNodeX, endNodeY});
+
+      let n1 = s.system.nodes.find(n => Math.hypot(n.x - startNodeX, n.y - startNodeY) < 20);
+      let n2 = s.system.nodes.find(n => Math.hypot(n.x - endNodeX, n.y - endNodeY) < 20);
+      
+      let newNodes = s.system.nodes;
+      
+      if (!n1) {
+        console.log("Creating new n1");
+        n1 = createNode(uid(), startNodeX, startNodeY);
+        newNodes = [...newNodes, n1];
+      }
+      if (!n2) {
+        console.log("Creating new n2");
+        n2 = createNode(uid(), endNodeX, endNodeY);
+        newNodes = [...newNodes, n2];
+      }
+      
+      if (n1.id === n2.id) return s;
+      
+      const exists = s.system.members.some(
+        m => (m.startNodeId === n1.id && m.endNodeId === n2.id) || 
+             (m.startNodeId === n2.id && m.endNodeId === n1.id)
+      );
+      
+      if (exists) return { system: { ...s.system, nodes: newNodes }, solution: null };
+      
+      const newMember = createMember(uid(), n1.id, n2.id);
+      return {
+        system: { ...s.system, nodes: newNodes, members: [...s.system.members, newMember] },
+        solution: null
+      };
+    });
+  },
+
+  updateMemberPolar: (memberId, lengthGrid, angleDeg) => {
+    const GRID = 40;
+    set((s) => {
+      const member = s.system.members.find(m => m.id === memberId);
+      if (!member) return s;
+      
+      const startNode = s.system.nodes.find(n => n.id === member.startNodeId);
+      const endNode = s.system.nodes.find(n => n.id === member.endNodeId);
+      if (!startNode || !endNode) return s;
+      
+      const rad = (angleDeg * Math.PI) / 180;
+      const lengthPx = lengthGrid * GRID;
+      
+      const newX = startNode.x + Math.cos(rad) * lengthPx;
+      const newY = startNode.y - Math.sin(rad) * lengthPx;
+      
+      const newNodes = s.system.nodes.map(n => 
+        n.id === endNode.id ? { ...n, x: newX, y: newY } : n
+      );
+      
+      return {
+        system: { ...s.system, nodes: newNodes },
+        solution: null
       };
     });
   },

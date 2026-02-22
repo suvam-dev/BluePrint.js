@@ -1,5 +1,5 @@
-import React, { useRef, useState, useCallback } from 'react';
-import { Stage, Layer, Line, Circle, Text, Arrow, Arc, Group, Rect, RegularPolygon } from 'react-konva';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { Stage, Layer, Line, Circle, Arrow, Arc, Text, Group, Rect } from 'react-konva';
 import useMechanicsStore from '../store/mechanicsStore';
 
 const GRID = 40; // pixels per grid unit
@@ -12,8 +12,8 @@ const SNAP_THRESHOLD = 20; // snap to existing node within this many px
 // but display in "grid units" (divide by GRID) in the sidebar/equations
 
 function snapToGrid(val) {
-  // 100 times more precise snapping (i.e., snap to 0.01 grid units)
-  const precision = GRID / 100;
+  // Snap to exact integer grid units
+  const precision = GRID;
   return Math.round(val / precision) * precision;
 }
 
@@ -100,7 +100,7 @@ function ForceArrow({ x, y, magnitude, angle }) {
   return (
     <Group>
       <Arrow
-        points={[x - dx, y - dy, x, y]}
+        points={[x, y, x + dx, y + dy]}
         fill="#facc15"
         stroke="#facc15"
         strokeWidth={2.5}
@@ -108,8 +108,8 @@ function ForceArrow({ x, y, magnitude, angle }) {
         pointerWidth={8}
       />
       <Text
-        x={x - dx - 10}
-        y={y - dy - 20}
+        x={x + dx + (dx > 0 ? 5 : -40)}
+        y={y + dy + (dy > 0 ? 5 : -15)}
         text={`${magnitude}kN`}
         fontSize={11}
         fill="#facc15"
@@ -138,31 +138,70 @@ function MomentArc({ x, y, magnitude }) {
 }
 
 // ─── Reaction Overlay ────────────────────────────────────────────────────
-function ReactionOverlay({ x, y, reactions }) {
+function ReactionOverlay({ x, y, reactions, members, nodeId }) {
   const entries = Object.entries(reactions);
+
+  // Find all angles of members connected to this node
+  const occupiedAngles = members.map(m => {
+    if (m.startNodeId === nodeId) return Math.atan2(m.endNode?.y - y, m.endNode?.x - x) * 180 / Math.PI;
+    if (m.endNodeId === nodeId) return Math.atan2(m.startNode?.y - y, m.startNode?.x - x) * 180 / Math.PI;
+    return null;
+  }).filter(a => a !== null).map(a => (a < 0 ? a + 360 : a));
+
+  const isOccupied = (angle) => {
+    const a = angle < 0 ? angle + 360 : angle;
+    return occupiedAngles.some(occ => {
+      let diff = Math.abs(a - occ);
+      if (diff > 180) diff = 360 - diff;
+      return diff < 45; // Avoid pointing within 45 degrees of a member
+    });
+  };
+
   return (
     <Group x={x} y={y}>
       {entries.map(([comp, val], i) => {
         if (comp === 'Rx') {
           const len = Math.min(80, Math.max(30, Math.abs(val) * 4));
-          const dir = val >= 0 ? 1 : -1;
+          // If val is positive, it mathematically means it points Right (0 deg)
+          // Mathematical Right on screen is angle 0. Mathematical Left is 180.
+          let dir = val >= 0 ? 1 : -1;
+          let angleReq = dir > 0 ? 0 : 180;
+          
+          let displayVal = val;
+          if (isOccupied(angleReq)) {
+            dir *= -1; // Flip arrow visually
+            displayVal *= -1; // Flip label mathematically so it remains correct
+          }
+
           return (
             <Group key={comp}>
-              <Arrow points={[dir * len, i * 0, 0, 0]} fill="#34d399" stroke="#34d399"
+              <Arrow points={[0, i * 0, dir * len, 0]} fill="#34d399" stroke="#34d399"
                 strokeWidth={2.5} pointerLength={10} pointerWidth={8} dash={[4, 4]} />
-              <Text x={dir * len + 5} y={-8} text={`Rx=${val}kN`}
+              <Text x={dir * len + (dir > 0 ? 5 : -45)} y={-16} text={`Rx=${displayVal.toFixed(2)}`}
                 fontSize={10} fill="#34d399" fontFamily="IBM Plex Mono, monospace" />
             </Group>
           );
         }
         if (comp === 'Ry') {
           const len = Math.min(80, Math.max(30, Math.abs(val) * 4));
-          const dir = val >= 0 ? -1 : 1;
+          // If val is positive, mathematically points UP. Wait, canvas Y is down.
+          // In standard mechanics format we print val. Mathematical Up = screen Up (angle -90 or 270).
+          // Down on screen is 90.
+          // Currently, for positive Ry, dir was -1 (pointing Up on canvas).
+          let dir = val >= 0 ? -1 : 1;
+          let angleReq = dir > 0 ? 90 : 270;
+          
+          let displayVal = val;
+          if (isOccupied(angleReq)) {
+            dir *= -1;
+            displayVal *= -1;
+          }
+
           return (
             <Group key={comp}>
-              <Arrow points={[0, dir * len, 0, 0]} fill="#34d399" stroke="#34d399"
+              <Arrow points={[0, 0, 0, dir * len]} fill="#34d399" stroke="#34d399"
                 strokeWidth={2.5} pointerLength={10} pointerWidth={8} dash={[4, 4]} />
-              <Text x={8} y={dir * len + 5} text={`Ry=${val}kN`}
+              <Text x={8} y={dir * len + (dir > 0 ? 5 : -12)} text={`Ry=${displayVal.toFixed(2)}`}
                 fontSize={10} fill="#34d399" fontFamily="IBM Plex Mono, monospace" />
             </Group>
           );
@@ -227,36 +266,113 @@ export default function CanvasBoard({ width, height }) {
     addNode, updateNodeCoords, addMember, addMemberFixed, addSupport, addForce, addMoment,
     removeNode, removeMember, removeSupport, removeForce, removeMoment,
     setPendingMemberStart, setSelectedNodeId, selectedNodeId,
+    addRodDirectly, updateMemberPolar,
   } = useMechanicsStore();
 
   const [modal, setModal] = useState(null); // { type, nodeId }
   const [hoverPos, setHoverPos] = useState(null);
+  
+  // Viewport State
+  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const [stageScale, setStageScale] = useState(1);
+  
   const stageRef = useRef(null);
 
-  // Draw grid lines
+  // Keyboard navigation for panning
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't pan if typing in an input (like the modal)
+      if (document.activeElement.tagName === 'INPUT') return;
+
+      const PAN_SPEED = 40;
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setStagePos(p => ({ ...p, y: p.y + PAN_SPEED }));
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setStagePos(p => ({ ...p, y: p.y - PAN_SPEED }));
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setStagePos(p => ({ ...p, x: p.x + PAN_SPEED }));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setStagePos(p => ({ ...p, x: p.x - PAN_SPEED }));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Handle Scroll Wheel Zooming
+  const handleWheel = useCallback((e) => {
+    e.evt.preventDefault();
+    const scaleBy = 1.05;
+    const stage = e.target.getStage();
+    const oldScale = stage.scaleX();
+
+    const mousePointTo = {
+      x: stage.getPointerPosition().x / oldScale - stage.x() / oldScale,
+      y: stage.getPointerPosition().y / oldScale - stage.y() / oldScale,
+    };
+
+    const newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
+    
+    // Clamp zoom
+    if (newScale > 3 || newScale < 0.2) return;
+
+    setStageScale(newScale);
+    setStagePos({
+      x: -(mousePointTo.x - stage.getPointerPosition().x / newScale) * newScale,
+      y: -(mousePointTo.y - stage.getPointerPosition().y / newScale) * newScale,
+    });
+  }, []);
+
+  // Draw grid lines (tile dynamically based on viewport so it looks infinite)
   const gridLines = [];
-  for (let x = 0; x <= width; x += GRID) {
+  const startX = Math.floor((-stagePos.x / stageScale) / GRID) * GRID;
+  const endX = startX + (width / stageScale) + GRID * 2;
+  const startY = Math.floor((-stagePos.y / stageScale) / GRID) * GRID;
+  const endY = startY + (height / stageScale) + GRID * 2;
+
+  for (let x = startX; x <= endX; x += GRID) {
     const isMajor = x % (GRID * 5) === 0;
     gridLines.push(
       <Line key={`gx${x}`}
-        points={[x, 0, x, height]}
+        points={[x, startY - GRID, x, endY + GRID]}
         stroke={isMajor ? 'rgba(30,100,200,0.3)' : 'rgba(25,70,140,0.15)'}
-        strokeWidth={isMajor ? 1 : 0.5} />
+        strokeWidth={isMajor ? 1 / stageScale : 0.5 / stageScale} />
     );
   }
-  for (let y = 0; y <= height; y += GRID) {
+  for (let y = startY; y <= endY; y += GRID) {
     const isMajor = y % (GRID * 5) === 0;
     gridLines.push(
       <Line key={`gy${y}`}
-        points={[0, y, width, y]}
+        points={[startX - GRID, y, endX + GRID, y]}
         stroke={isMajor ? 'rgba(30,100,200,0.3)' : 'rgba(25,70,140,0.15)'}
-        strokeWidth={isMajor ? 1 : 0.5} />
+        strokeWidth={isMajor ? 1 / stageScale : 0.5 / stageScale} />
     );
   }
 
   const handleStageClick = useCallback((e) => {
+    // Only process drawing clicks if not dragging
+    if (e.evt.button !== 0) return; // only left click
+    
+    // Check if we are clicking on empty space vs a shape (Node/Member)
+    // In Konva, the stage or layer will be the target if empty space is clicked.
+    // We want to avoid triggering stage clicks if we actually clicked a node (which handles its own clicks).
+    const isNodeOrShape = e.target.attrs?.id || e.target.parent?.attrs?.name === 'member';
+    if (isNodeOrShape && mode !== 'addMember' && mode !== 'addMemberFixed' && mode !== 'addForce' && mode !== 'addMoment' && mode !== 'addPin' && mode !== 'addRoller' && mode !== 'addFixed') {
+      return; 
+    }
+
     const stage = e.target.getStage();
-    const pos = stage.getPointerPosition();
+    const rawPos = stage.getPointerPosition();
+    if (!rawPos) return;
+    const pos = {
+      x: (rawPos.x - stage.x()) / stage.scaleX(),
+      y: (rawPos.y - stage.y()) / stage.scaleY()
+    };
     const sx = snapToGrid(pos.x);
     const sy = snapToGrid(pos.y);
     const snapped = nearestNode(system.nodes, system.members, pos.x, pos.y);
@@ -307,11 +423,18 @@ export default function CanvasBoard({ width, height }) {
     }
 
     if (mode === 'addMemberFixed') {
+      let clickX, clickY;
       if (snapped) {
         const targetNodeId = resolveSnapNodeId();
         if (!targetNodeId) return;
-        setModal({ type: 'memberFixed', nodeId: targetNodeId });
+        const targetNode = system.nodes.find(n => n.id === targetNodeId);
+        clickX = targetNode.x;
+        clickY = targetNode.y;
+      } else {
+        clickX = sx;
+        clickY = sy;
       }
+      setModal({ type: 'memberFixed', coords: { x: clickX / GRID, y: -clickY / GRID } });
       return;
     }
 
@@ -345,23 +468,67 @@ export default function CanvasBoard({ width, height }) {
   }, [mode, pendingMemberStart, system.nodes, system.members, addNode, addMember, removeMember, addSupport, setPendingMemberStart]);
 
   const handleMouseMove = useCallback((e) => {
-    const pos = e.target.getStage().getPointerPosition();
-    setHoverPos({ x: snapToGrid(pos.x), y: snapToGrid(pos.y) });
-  }, []);
+    const stage = e.target.getStage();
+    const rawPos = stage.getPointerPosition();
+    if (!rawPos) return;
+    const pos = {
+      x: (rawPos.x - stage.x()) / stage.scaleX(),
+      y: (rawPos.y - stage.y()) / stage.scaleY()
+    };
+    const snapped = nearestNode(system.nodes, system.members, pos.x, pos.y);
+    // Draw preview dot
+    setHoverPos({
+      x: snapped ? snapped.x : snapToGrid(pos.x),
+      y: snapped ? snapped.y : snapToGrid(pos.y),
+      snapped: !!snapped
+    });
+  }, [system]);
 
   const getSupportForNode = (nodeId) =>
     system.supports.find((sp) => sp.nodeId === nodeId);
 
   const getNodeById = (id) => system.nodes.find((n) => n.id === id);
 
+  const cursor = mode === 'addNode' ? 'crosshair' : mode === 'select' ? 'default' : 'pointer';
+
   return (
-    <div className="relative w-full h-full">
+    <div className="flex-1 bg-[#02050a] relative overflow-hidden" style={{ cursor }}>
+      {/* HUD controls (Zoom) */}
+      <div className="absolute bottom-6 right-6 z-10 flex flex-col gap-2">
+        <button className="bg-blue-900/40 border border-blue-500/30 text-blue-300 w-10 h-10 rounded-lg flex items-center justify-center hover:bg-blue-800/60 transition-colors shadow-lg backdrop-blur-sm"
+          onClick={() => {
+            const newScale = Math.min(stageScale * 1.2, 3);
+            setStageScale(newScale);
+          }}>
+          <span className="text-xl font-bold">+</span>
+        </button>
+        <button className="bg-blue-900/40 border border-blue-500/30 text-blue-300 w-10 h-10 rounded-lg flex items-center justify-center hover:bg-blue-800/60 transition-colors shadow-lg backdrop-blur-sm"
+          onClick={() => {
+            const newScale = Math.max(stageScale / 1.2, 0.2);
+            setStageScale(newScale);
+          }}>
+          <span className="text-xl font-bold">−</span>
+        </button>
+      </div>
+
       <Stage
-        ref={stageRef}
         width={width}
         height={height}
+        ref={stageRef}
+        x={stagePos.x}
+        y={stagePos.y}
+        scaleX={stageScale}
+        scaleY={stageScale}
+        draggable={mode === 'select'}
+        onDragMove={(e) => {
+          if (e.target === stageRef.current) {
+            setStagePos({ x: e.target.x(), y: e.target.y() });
+          }
+        }}
+        onWheel={handleWheel}
         onClick={handleStageClick}
         onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverPos(null)}
         style={{ cursor: mode === 'addNode' ? 'crosshair' : mode === 'select' ? 'default' : 'pointer' }}
       >
         <Layer>
@@ -393,10 +560,45 @@ export default function CanvasBoard({ width, height }) {
             return (
               <Group 
                 key={m.id} 
+                draggable={mode === 'select'}
+                onDragMove={(e) => {
+                  if (mode !== 'select') return;
+                  const absX = e.target.x();
+                  const absY = e.target.y();
+                  // For a smooth dragging feel without permanently committing until DragEnd
+                  // We'll just let Konva move the Group visibly.
+                }}
+                onDragEnd={(e) => {
+                  if (mode !== 'select') return;
+                  const dx = e.target.x();
+                  const dy = e.target.y();
+                  e.target.position({ x: 0, y: 0 }); // reset group translation
+                  
+                  // Apply translation to nodes
+                  const pxStartX = Math.round((s.x + dx) * Math.round(GRID / 100) * 100);
+                  const pxStartY = Math.round((s.y + dy) * Math.round(GRID / 100) * 100);
+                  const pxEndX = Math.round((e.x + dx) * Math.round(GRID / 100) * 100);
+                  const pxEndY = Math.round((e.y + dy) * Math.round(GRID / 100) * 100);
+                  
+                  updateNodeCoords(s.id, pxStartX, pxStartY);
+                  updateNodeCoords(e.id, pxEndX, pxEndY);
+                }}
                 onClick={(e) => {
                   if (mode === 'delete') {
                     e.cancelBubble = true;
                     removeMember(m.id);
+                  }
+                }}
+                onDblClick={(e) => {
+                  if (mode === 'select') {
+                    e.cancelBubble = true;
+                    const mathAngle = (Math.atan2(s.y - e.y, e.x - s.x) * 180 / Math.PI);
+                    setModal({
+                      type: 'editMember',
+                      memberId: m.id,
+                      defaultLength: lenUnits,
+                      defaultAngle: mathAngle.toFixed(2)
+                    });
                   }
                 }}
               >
@@ -419,8 +621,14 @@ export default function CanvasBoard({ width, height }) {
                 <Circle x={midX} y={midY} radius={3} fill="#1d4ed8" stroke="#60a5fa" strokeWidth={1.5} />
                 {/* Length/Force label */}
                 <Group x={midX} y={midY} rotation={angle > 90 || angle < -90 ? angle + 180 : angle}>
+                  <Rect
+                    x={-40} y={-16}
+                    width={80} height={12}
+                    fill="rgba(3,8,16,0.7)"
+                    cornerRadius={2}
+                  />
                   <Text
-                    x={-40} y={-18}
+                    x={-40} y={-14}
                     text={forceText}
                     fontSize={10}
                     fill={forceColor}
@@ -580,7 +788,16 @@ export default function CanvasBoard({ width, height }) {
             Object.entries(solution.reactions).map(([nodeId, reacts]) => {
               const node = getNodeById(nodeId);
               if (!node) return null;
-              return <ReactionOverlay key={nodeId} x={node.x} y={node.y} reactions={reacts} />;
+              
+              const connectedMembers = system.members
+                .filter(m => m.startNodeId === nodeId || m.endNodeId === nodeId)
+                .map(m => ({
+                  ...m,
+                  startNode: getNodeById(m.startNodeId),
+                  endNode: getNodeById(m.endNodeId)
+                }));
+                
+              return <ReactionOverlay key={nodeId} x={node.x} y={node.y} reactions={reacts} members={connectedMembers} nodeId={nodeId} />;
             })}
         </Layer>
       </Stage>
@@ -621,7 +838,23 @@ export default function CanvasBoard({ width, height }) {
             { key: 'angle', label: 'Angle (° from +X, CCW)', placeholder: '0', default: '0' },
           ]}
           onConfirm={(v) => {
-            addMemberFixed(modal.nodeId, parseFloat(v.length), parseFloat(v.angle));
+            if (modal.coords) {
+              addRodDirectly(modal.coords.x, modal.coords.y, parseFloat(v.length), parseFloat(v.angle));
+            }
+            setModal(null);
+          }}
+          onCancel={() => setModal(null)}
+        />
+      )}
+      {modal?.type === 'editMember' && (
+        <InputModal
+          title={`✏️ Edit Rod Parameters`}
+          fields={[
+            { key: 'length', label: 'Length (grid units)', placeholder: '0.00', default: modal.defaultLength },
+            { key: 'angle', label: 'Angle (° from +X, CCW)', placeholder: '0.00', default: modal.defaultAngle },
+          ]}
+          onConfirm={(v) => {
+            updateMemberPolar(modal.memberId, parseFloat(v.length), parseFloat(v.angle));
             setModal(null);
           }}
           onCancel={() => setModal(null)}
